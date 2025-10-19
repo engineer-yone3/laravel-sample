@@ -34,9 +34,9 @@ COPY appRoot/ /app
 WORKDIR /app
 RUN composer install --no-dev --optimize-autoloader --no-interaction
 
-RUN npm ci --only=production
-
+RUN npm ci
 RUN npm run build
+RUN npm prune --production
 
 RUN chown -R www-data:www-data /app \
     && chmod -R 755 /app \
