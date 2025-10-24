@@ -320,4 +320,4 @@ jobs:
           fi
           
           echo "### Release Notes Preview:" >> $GITHUB_STEP_SUMMARY
-          echo '${{ steps.release_notes.outputs.release_notes }}' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.release_notes.outputs.release_notes }}" >> $GITHUB_STEP_SUMMARY
