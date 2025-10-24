@@ -1,0 +1,316 @@
+name: Create Release and Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type'
+        required: true
+        default: 'minor'
+        type: choice
+        options:
+          - major
+          - minor
+          - patch
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get latest tag and release info
+        id: get_latest_tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 最新のタグを取得（存在しない場合はv0.0.0とする）
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          echo "Latest tag: $LATEST_TAG"
+          
+          # 既存のリリース情報があるかチェック
+          if [ "$LATEST_TAG" != "v0.0.0" ]; then
+            echo "Checking existing release for tag: $LATEST_TAG"
+            RELEASE_INFO=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$LATEST_TAG" 2>/dev/null || echo "{}")
+          
+            RELEASE_BODY=$(echo "$RELEASE_INFO" | jq -r '.body // ""')
+            if [ "$RELEASE_BODY" != "" ] && [ "$RELEASE_BODY" != "null" ]; then
+              echo "Found existing release notes for $LATEST_TAG"
+              echo "existing_release_found=true" >> $GITHUB_OUTPUT
+            else
+              echo "No existing release notes found for $LATEST_TAG"
+              echo "existing_release_found=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "existing_release_found=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Calculate next version
+        id: next_version
+        run: |
+          LATEST_TAG="${{ steps.get_latest_tag.outputs.latest_tag }}"
+          VERSION_BUMP="${{ github.event.inputs.version_bump }}"
+          
+          # vプレフィックスを除去
+          VERSION=${LATEST_TAG#v}
+          
+          # バージョン番号を分割
+          IFS='.' read -ra VERSION_PARTS <<< "$VERSION"
+          MAJOR=${VERSION_PARTS[0]:-0}
+          MINOR=${VERSION_PARTS[1]:-0}
+          PATCH=${VERSION_PARTS[2]:-0}
+          
+          # バージョンをインクリメント
+          case $VERSION_BUMP in
+            major)
+              echo "🚀 Major version bump: 大きな変更・リニューアル"
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+              ;;
+            minor)
+              echo "✨ Minor version bump: 通常の機能追加・改善"
+              MINOR=$((MINOR + 1))
+              PATCH=0
+              ;;
+            patch)
+              echo "🔧 Patch version bump: 緊急修正・小さなバグ修正"
+              PATCH=$((PATCH + 1))
+              ;;
+          esac
+          
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "New version: $NEW_VERSION"
+
+      - name: Get merged PRs since last tag
+        id: get_prs
+        run: |
+          LATEST_TAG="${{ steps.get_latest_tag.outputs.latest_tag }}"
+          
+          # 最新タグから現在までのコミット範囲を取得
+          if [ "$LATEST_TAG" = "v0.0.0" ]; then
+            COMMIT_RANGE="HEAD"
+          else
+            COMMIT_RANGE="${LATEST_TAG}..HEAD"
+          fi
+          
+          # マージコミットからPR番号を抽出
+          PR_NUMBERS=$(git log $COMMIT_RANGE --merges --oneline | grep -o '#[0-9]\+' | sort -u | tr '\n' ' ')
+          echo "pr_numbers=$PR_NUMBERS" >> $GITHUB_OUTPUT
+          echo "Found PRs: $PR_NUMBERS"
+
+      - name: Generate release notes
+        id: release_notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBERS="${{ steps.get_prs.outputs.pr_numbers }}"
+          NEW_VERSION="${{ steps.next_version.outputs.new_version }}"
+          VERSION_BUMP="${{ github.event.inputs.version_bump }}"
+          
+          # バージョンタイプの説明を追加
+          case $VERSION_BUMP in
+            major)
+              VERSION_TYPE_DESC="🚀 **Major Release** - 大きな変更・リニューアル"
+              RELEASE_SUMMARY="このメジャーリリースには、重要な新機能や大幅な改善が含まれています。"
+              ;;
+            minor)
+              VERSION_TYPE_DESC="✨ **Minor Release** - 通常の機能追加・改善"
+              RELEASE_SUMMARY="このマイナーリリースには、新機能の追加と既存機能の改善が含まれています。"
+              ;;
+            patch)
+              VERSION_TYPE_DESC="🔧 **Patch Release** - 緊急修正・小さなバグ修正"
+              RELEASE_SUMMARY="このパッチリリースには、バグ修正とセキュリティアップデートが含まれています。"
+              ;;
+          esac
+          
+          # テンプレートベースのリリースノートを生成
+          cat > release_notes.md << EOF
+          ## 🚀 Release Summary / リリース概要
+          
+          $RELEASE_SUMMARY
+          
+          $VERSION_TYPE_DESC
+          
+          ## ✨ What's Changed / 変更内容
+          
+          EOF
+          
+          # 既存のリリースが見つかった場合の情報表示
+          if [ "${{ steps.get_latest_tag.outputs.existing_release_found }}" = "true" ]; then
+            echo "<!-- 前回リリース: ${{ steps.get_latest_tag.outputs.latest_tag }} からの変更点 -->" >> release_notes.md
+            echo "<!-- Changes since previous release: ${{ steps.get_latest_tag.outputs.latest_tag }} -->" >> release_notes.md
+            echo "" >> release_notes.md
+          fi
+          
+          # PRを分類して追加
+          declare -A pr_categories
+          declare -A new_features
+          declare -A improvements
+          declare -A bug_fixes
+          declare -A docs
+          declare -A infrastructure
+          
+          # 各PRの情報を取得して分類
+          for pr_num in $PR_NUMBERS; do
+            if [ -n "$pr_num" ]; then
+              pr_number=${pr_num#\#}
+              echo "Getting info for PR #$pr_number"
+          
+              # GitHub APIを使ってPR情報を取得
+              pr_info=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                "https://api.github.com/repos/${{ github.repository }}/pulls/$pr_number")
+          
+              pr_title=$(echo "$pr_info" | jq -r '.title // "Unknown"')
+              pr_user=$(echo "$pr_info" | jq -r '.user.login // "unknown"')
+              pr_labels=$(echo "$pr_info" | jq -r '.labels[].name' | tr '\n' ' ')
+          
+              if [ "$pr_title" != "null" ] && [ "$pr_title" != "Unknown" ]; then
+                pr_line="- $pr_title (#$pr_number) by @$pr_user"
+          
+                # ラベルまたはタイトルに基づいて分類
+                if echo "$pr_labels $pr_title" | grep -qi "feature\|feat\|新機能\|add"; then
+                  new_features["$pr_number"]="$pr_line"
+                elif echo "$pr_labels $pr_title" | grep -qi "bug\|fix\|修正\|hotfix"; then
+                  bug_fixes["$pr_number"]="$pr_line"
+                elif echo "$pr_labels $pr_title" | grep -qi "doc\|readme\|ドキュメント"; then
+                  docs["$pr_number"]="$pr_line"
+                elif echo "$pr_labels $pr_title" | grep -qi "ci\|cd\|docker\|deploy\|infra"; then
+                  infrastructure["$pr_number"]="$pr_line"
+                else
+                  improvements["$pr_number"]="$pr_line"
+                fi
+              fi
+            fi
+          done
+          
+          # 分類別にリリースノートに追加
+          if [ ${#new_features[@]} -gt 0 ]; then
+            echo "### 🆕 New Features / 新機能" >> release_notes.md
+            echo "" >> release_notes.md
+            for pr in "${new_features[@]}"; do
+              echo "$pr" >> release_notes.md
+            done
+            echo "" >> release_notes.md
+          fi
+          
+          if [ ${#improvements[@]} -gt 0 ]; then
+            echo "### 🔧 Improvements / 改善" >> release_notes.md
+            echo "" >> release_notes.md
+            for pr in "${improvements[@]}"; do
+              echo "$pr" >> release_notes.md
+            done
+            echo "" >> release_notes.md
+          fi
+          
+          if [ ${#bug_fixes[@]} -gt 0 ]; then
+            echo "### 🐛 Bug Fixes / バグ修正" >> release_notes.md
+            echo "" >> release_notes.md
+            for pr in "${bug_fixes[@]}"; do
+              echo "$pr" >> release_notes.md
+            done
+            echo "" >> release_notes.md
+          fi
+          
+          if [ ${#docs[@]} -gt 0 ]; then
+            echo "### 📚 Documentation / ドキュメント" >> release_notes.md
+            echo "" >> release_notes.md
+            for pr in "${docs[@]}"; do
+              echo "$pr" >> release_notes.md
+            done
+            echo "" >> release_notes.md
+          fi
+          
+          if [ ${#infrastructure[@]} -gt 0 ]; then
+            echo "### 🏗️ Infrastructure / インフラストラクチャ" >> release_notes.md
+            echo "" >> release_notes.md
+            for pr in "${infrastructure[@]}"; do
+              echo "$pr" >> release_notes.md
+            done
+            echo "" >> release_notes.md
+          fi
+          
+          # フッターを追加
+          cat >> release_notes.md << 'EOF'
+          ## 📝 Full Changelog / 全変更履歴
+          EOF
+          
+          LATEST_TAG="${{ steps.get_latest_tag.outputs.latest_tag }}"
+          if [ "$LATEST_TAG" != "v0.0.0" ]; then
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${LATEST_TAG}...${NEW_VERSION}" >> release_notes.md
+          else
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/commits/${NEW_VERSION}" >> release_notes.md
+          fi
+          
+          # リリースノートの内容を出力変数に設定
+          {
+            echo 'release_notes<<EOF'
+            cat release_notes.md
+            echo EOF
+          } >> $GITHUB_OUTPUT
+
+      - name: Create tag
+        run: |
+          NEW_VERSION="${{ steps.next_version.outputs.new_version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEW_VERSION" -m "Release $NEW_VERSION"
+          git push origin "$NEW_VERSION"
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEW_VERSION="${{ steps.next_version.outputs.new_version }}"
+          
+          # リリースを作成
+          curl -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases" \
+            -d @- << EOF
+          {
+            "tag_name": "$NEW_VERSION",
+            "target_commitish": "main",
+            "name": "$NEW_VERSION",
+            "body": $(echo '${{ steps.release_notes.outputs.release_notes }}' | jq -Rs .),
+            "draft": false,
+            "prerelease": false
+          }
+          EOF
+
+      - name: Summary
+        run: |
+          NEW_VERSION="${{ steps.next_version.outputs.new_version }}"
+          LATEST_TAG="${{ steps.get_latest_tag.outputs.latest_tag }}"
+          EXISTING_RELEASE="${{ steps.get_latest_tag.outputs.existing_release_found }}"
+          
+          echo "## Release Created Successfully! 🎉" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **New Version**: $NEW_VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "- **Previous Version**: $LATEST_TAG" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version Bump**: ${{ github.event.inputs.version_bump }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Existing Release Found**: $EXISTING_RELEASE" >> $GITHUB_STEP_SUMMARY
+          echo "- **Release URL**: https://github.com/${{ github.repository }}/releases/tag/$NEW_VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "$EXISTING_RELEASE" = "true" ]; then
+            echo "### 📋 Version History Context:" >> $GITHUB_STEP_SUMMARY
+            echo "This release builds upon the existing release **$LATEST_TAG**" >> $GITHUB_STEP_SUMMARY
+            echo "このリリースは既存のリリース **$LATEST_TAG** をベースにしています" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "### Release Notes Preview:" >> $GITHUB_STEP_SUMMARY
+          echo '${{ steps.release_notes.outputs.release_notes }}' >> $GITHUB_STEP_SUMMARY

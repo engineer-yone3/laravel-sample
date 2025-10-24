@@ -24,7 +24,7 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 RUN pecl install xdebug \
     && docker-php-ext-enable xdebug
 
-RUN a2enmod rewrite
+RUN a2enmod rewrite ssl headers
 
 ENV APACHE_DOCUMENT_ROOT /app/public
 RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf
@@ -33,6 +33,10 @@ RUN sed -ri -e 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf
 RUN chown -R www-data:www-data /app \
     && chmod -R 755 /app
 
-EXPOSE 80
+# エントリーポイントスクリプトをコピー
+COPY .docker/php/docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-CMD ["apache2-foreground"]
+EXPOSE 80 443
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

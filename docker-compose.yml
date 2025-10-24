@@ -5,11 +5,13 @@ services:
       dockerfile: .docker/php/Dockerfile
     ports:
       - "8080:80"
+      - "8443:443"
       - "5173:5173"
     volumes:
       - ./appRoot:/app
       - ./.docker/php/php.ini:/usr/local/etc/php/conf.d/zz-custom.ini
-      - ./.docker/apache/000-default.conf:/etc/apache2/sites-available/000-default.conf
+      - ./.docker/apache/000-default-ssl.conf:/etc/apache2/sites-available/000-default.conf
+      - ./.docker/ssl:/ssl
     environment:
       - APACHE_DOCUMENT_ROOT=/app/public
     depends_on:
