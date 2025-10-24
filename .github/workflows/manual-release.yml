@@ -255,9 +255,9 @@ jobs:
           
           # リリースノートの内容を出力変数に設定
           {
-            echo 'release_notes<<EOF'
+            echo 'release_notes<<RELEASE_EOF'
             cat release_notes.md
-            echo EOF
+            echo RELEASE_EOF
           } >> $GITHUB_OUTPUT
 
       - name: Create tag
@@ -274,21 +274,22 @@ jobs:
         run: |
           NEW_VERSION="${{ steps.next_version.outputs.new_version }}"
           
+          # リリースノートをJSONエスケープ
+          RELEASE_BODY=$(echo '${{ steps.release_notes.outputs.release_notes }}' | jq -Rs .)
+          
           # リリースを作成
           curl -X POST \
             -H "Authorization: token $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${{ github.repository }}/releases" \
-            -d @- << EOF
-          {
-            "tag_name": "$NEW_VERSION",
-            "target_commitish": "main",
-            "name": "$NEW_VERSION",
-            "body": $(echo '${{ steps.release_notes.outputs.release_notes }}' | jq -Rs .),
-            "draft": false,
-            "prerelease": false
-          }
-          EOF
+            -d "{
+              \"tag_name\": \"$NEW_VERSION\",
+              \"target_commitish\": \"main\",
+              \"name\": \"$NEW_VERSION\",
+              \"body\": $RELEASE_BODY,
+              \"draft\": false,
+              \"prerelease\": false
+            }"
 
       - name: Summary
         run: |
