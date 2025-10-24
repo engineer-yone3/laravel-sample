@@ -34,6 +34,21 @@ services:
     networks:
       - laravel_network
 
+  act:
+    build:
+      context: .
+      dockerfile: .docker/act/Dockerfile
+    container_name: act-runner
+    volumes:
+      - ./:/workspace:delegated
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    networks:
+      - laravel_network
+
 volumes:
   mysql_data:
 
